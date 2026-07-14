@@ -1,0 +1,26 @@
+# Example CPA config snippet enabling cpa-login-hub.
+#
+# Merge this into your existing CPA `config.yaml` — do not use it as a
+# standalone config; CPA requires several other top-level keys.
+
+plugins:
+  enabled: true
+  dir: ~/.cli-proxy-api/plugins
+  configs:
+    cpa-login-hub:
+      enabled: true
+      priority: 100
+      # Optional per-provider defaults. Panel/API can override at call time.
+      defaults:
+        # kiro IdC
+        kiro:
+          region: us-east-1
+          headless: false      # visible browser recommended for first-time
+        # kiro M365 (v0.2)
+        kiro-m365: {}
+        # openai / codex (v0.2)
+        openai: {}
+        # grok (v0.2)
+        grok: {}
+        # antigravity (v0.2)
+        antigravity: {}

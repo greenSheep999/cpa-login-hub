@@ -1,0 +1,29 @@
+# Go build artifacts
+*.so
+*.dylib
+*.dll
+*.h
+*.exe
+*.test
+*.out
+
+# Python venv + generated worker runtime state
+worker/.venv/
+worker/.setup_done
+worker/.setup.lock
+worker/runs/
+worker/**/__pycache__/
+worker/**/*.pyc
+
+# IDE / OS junk
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Local secrets — never commit
+*.env
+.env
+worker/.env
+worker/output/
+worker/idc_secrets.jsonl
