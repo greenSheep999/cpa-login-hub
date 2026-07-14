@@ -4,13 +4,20 @@ name: overlay-image
 # + Playwright system libs + pre-warmed venv + pre-fetched Firefox binary.
 # Publishes to ghcr.io/greensheep999/cpa-login-hub-overlay.
 #
-# Two-token auth:
-#   - GHCR_PULL_USER / GHCR_PULL_TOKEN  (daniellee2015 PAT)
-#       Needed to pull the private base image
-#       ghcr.io/daniellee2015/cli-proxy-api:latest during docker build.
-#   - GHCR_PUSH_USER / GHCR_PUSH_TOKEN  (greenSheep999 PAT)
-#       Used for the final `docker push` since the target image lives
-#       in the greensheep999 namespace on GHCR.
+# Auth strategy — solves the "one GHCR host, two accounts" problem:
+#   - PULL side (private base ghcr.io/daniellee2015/cli-proxy-api):
+#       docker/login-action step 1 uses GHCR_PULL_TOKEN (daniellee2015 PAT
+#       from repo secrets).
+#   - PUSH side (ghcr.io/greensheep999/cpa-login-hub-overlay):
+#       docker/login-action step 2 uses github.actor + secrets.GITHUB_TOKEN.
+#       GITHUB_TOKEN is auto-provided by Actions and has packages:write
+#       permission on THIS repo's owner namespace (greensheep999). No PAT
+#       needed. The second login overwrites the first in docker config,
+#       so the final `docker push` uses greensheep999 credentials — which
+#       is exactly what we want.
+#   - Buildx cache pull for the FROM base is done during the same job
+#       as login step 1, before step 2 overwrites it (docker/login-action
+#       and buildx share the same config layer within a job).
 #
 # Trigger: push to main / tags v* / manual workflow_dispatch.
 
@@ -43,28 +50,28 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Login #1: daniellee2015 — grants pull rights on the private base
-      # image. buildx will use whichever creds satisfy the FROM directive.
-      - name: Login (pull) — daniellee2015
+      - name: Login (pull) — daniellee2015 PAT
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ secrets.GHCR_PULL_USER }}
           password: ${{ secrets.GHCR_PULL_TOKEN }}
 
-      # Login #2: greenSheep999 — target namespace for push. docker
-      # login stacks credentials per-registry in ~/.docker/config.json
-      # keyed by registry hostname, so the SECOND login overwrites the
-      # first for ghcr.io. Buildx still remembers the earlier session
-      # for the FROM pull because it caches per-build-step. We keep the
-      # push login last so `docker push` at the end of build-push-action
-      # uses greenSheep999 creds.
-      - name: Login (push) — greenSheep999
+      - name: Pre-pull base image with daniellee2015 creds
+        # Cache the base image into buildx local store BEFORE we swap
+        # docker config to the greensheep999 GITHUB_TOKEN. This way the
+        # FROM directive in Dockerfile.overlay resolves from local cache
+        # instead of re-hitting the registry after the login swap.
+        run: |
+          docker pull ${{ env.BASE_IMAGE }}
+          docker image ls ${{ env.BASE_IMAGE }}
+
+      - name: Login (push) — GITHUB_TOKEN
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.GHCR_PUSH_USER }}
-          password: ${{ secrets.GHCR_PUSH_TOKEN }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Lowercase image name
         id: img
@@ -79,12 +86,6 @@ jobs:
           push: true
           build-args: |
             BASE=${{ env.BASE_IMAGE }}
-          # Pass the pull-side credentials in via a secret so buildx can
-          # authenticate the FROM instruction against the private base
-          # image regardless of which login is "topmost" in the
-          # docker config. See docker/build-push-action#623.
-          secrets: |
-            GIT_AUTH_TOKEN=${{ secrets.GHCR_PULL_TOKEN }}
           tags: |
             ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}:latest-arm64
             ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}:${{ github.ref_name }}-arm64
@@ -101,19 +102,24 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login (pull) — daniellee2015
+      - name: Login (pull) — daniellee2015 PAT
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ secrets.GHCR_PULL_USER }}
           password: ${{ secrets.GHCR_PULL_TOKEN }}
 
-      - name: Login (push) — greenSheep999
+      - name: Pre-pull base image
+        run: |
+          docker pull ${{ env.BASE_IMAGE }}
+          docker image ls ${{ env.BASE_IMAGE }}
+
+      - name: Login (push) — GITHUB_TOKEN
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.GHCR_PUSH_USER }}
-          password: ${{ secrets.GHCR_PUSH_TOKEN }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Lowercase image name
         id: img
@@ -128,8 +134,6 @@ jobs:
           push: true
           build-args: |
             BASE=${{ env.BASE_IMAGE }}
-          secrets: |
-            GIT_AUTH_TOKEN=${{ secrets.GHCR_PULL_TOKEN }}
           tags: |
             ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}:latest-amd64
             ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}:${{ github.ref_name }}-amd64
@@ -144,13 +148,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Only need push credentials here — imagetools just tags remote refs.
-      - name: Login — greenSheep999
+      - name: Login — GITHUB_TOKEN
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.GHCR_PUSH_USER }}
-          password: ${{ secrets.GHCR_PUSH_TOKEN }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Lowercase image name
         id: img
