@@ -49,16 +49,22 @@ clean:
 	rm -f $(PLUGIN_NAME).so $(PLUGIN_NAME).dylib $(PLUGIN_NAME).dll $(PLUGIN_NAME).h
 
 install: build
+	@# CPA's plugin scanner (platform.go:selectPluginFiles) only looks at
+	@# the top level of $(CPA_PLUGIN_DIR) — it does NOT recurse. So the
+	@# .dylib/.so MUST sit at the top level, while worker/ lives in a
+	@# sibling directory named after the plugin (worker_bridge.go:
+	@# pluginBundleDir resolves via dladdr → sibling subdir).
+	@mkdir -p "$(CPA_PLUGIN_DIR)"
+	cp $(PLUGIN_NAME).$(EXT) "$(CPA_PLUGIN_DIR)/"
 	@mkdir -p "$(CPA_PLUGIN_DIR)/$(PLUGIN_NAME)"
-	cp $(PLUGIN_NAME).$(EXT) "$(CPA_PLUGIN_DIR)/$(PLUGIN_NAME)/"
-	@# worker/ ships alongside so the venv is provisioned inside the
-	@# plugin bundle CPA discovers.
 	rsync -a --delete \
 	  --exclude '.venv/' --exclude '__pycache__/' --exclude '*.pyc' \
 	  --exclude '.setup_done' --exclude '.setup.lock' \
 	  --exclude 'runs/' --exclude 'output/' \
 	  worker/ "$(CPA_PLUGIN_DIR)/$(PLUGIN_NAME)/worker/"
-	@echo "Installed to $(CPA_PLUGIN_DIR)/$(PLUGIN_NAME)/"
+	@echo "Installed:"
+	@echo "  $(CPA_PLUGIN_DIR)/$(PLUGIN_NAME).$(EXT)  (CPA scans this)"
+	@echo "  $(CPA_PLUGIN_DIR)/$(PLUGIN_NAME)/worker/  (Python worker + venv)"
 	@echo "First login run will auto-provision Python venv (~90s)."
 
 worker-setup:

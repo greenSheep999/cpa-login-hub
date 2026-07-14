@@ -27,3 +27,16 @@ worker/**/*.pyc
 worker/.env
 worker/output/
 worker/idc_secrets.jsonl
+
+# Build artifacts
+cpa-login-hub-*.tar.gz
+*.dylib
+*.so
+*.h
+!cpa-login-hub.h.example
+panel-preview.png
+
+# Playwright screenshot / debug leftovers
+tools/*.png
+/tmp-*
+stage/

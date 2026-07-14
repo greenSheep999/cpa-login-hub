@@ -163,11 +163,25 @@ metadata (`sso_username`, `generated_password`, `generated_totp_secret`)
 gets carried through if the state machine captured it — useful for
 audit trails and re-login after a full session invalidation.
 
-## What's not implemented in v0.1
+## Status (v0.2)
 
-- StartLogin for openai / grok / antigravity / kiro-M365 / codex —
-  the worker code exists but the Go dispatch returns `not_implemented`.
-  Wiring them up is a v0.2 task (mostly copying the kiro pattern).
-- Custom management panel resource (a `management.register` capability
-  advertising an in-panel HTML page for batch operations). v0.3.
-- SMS provider abstraction (currently chongpt.xyz only). v0.4.
+**Wired end-to-end**:
+- Umbrella identifier `cpa-login-hub` — single `.dylib` serves all 5 providers.
+- ManagementAPI capability: HTML panel embedded via `go:embed`, exposed
+  under `/v0/resource/plugins/cpa-login-hub/panel`, backed by
+  `/v0/management/cpa-login-hub/prepare` + `/status` + `/cancel`.
+- Async StartLogin: panel `/prepare` stashes params in `pendingSlot`,
+  StartLogin pops them and spawns a worker goroutine, returns immediately
+  with a state token; PollLogin drains the goroutine result.
+- All 5 providers have first-time login (`kiro` including IdC + M365 auto-
+  select, `openai`, `grok`, `antigravity`, `cursor`).
+- Refresh implemented protocol-only for `kiro` (IdC + external_idp),
+  `openai`, `grok`, `antigravity`.
+
+**Still deferred**:
+- `cursor` refresh needs a cookie-session flow. Neither Python nor Go
+  side has ported it — expired cursor tokens require re-login through
+  the panel. Follow-up.
+- kiro social (Cognito) refresh — returns `not_implemented` since the
+  raw OAuth flow isn't fully documented in helpers/kiro.py.
+- SMS provider abstraction (currently chongpt.xyz only). Future.

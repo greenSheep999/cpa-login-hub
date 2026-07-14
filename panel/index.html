@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="default">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CPA Login Hub</title>
+  <link rel="icon" type="image/png" href="/v0/resource/plugins/cpa-login-hub/logo.png">
+  <link rel="stylesheet" href="/v0/resource/plugins/cpa-login-hub/panel.css?v=BUILD_STAMP">
+</head>
+<body>
+  <main class="panel">
+    <header class="panel-header">
+      <img class="logo" src="/v0/resource/plugins/cpa-login-hub/logo.png" alt="CPA Login Hub">
+      <div class="titles">
+        <h1>CPA Login Hub</h1>
+        <p class="subtitle" data-i18n="header.subtitle"></p>
+      </div>
+      <div class="header-toolbar">
+        <select id="lang-picker" title="Language" aria-label="Language"></select>
+        <select id="theme-picker" title="Theme" aria-label="Theme"></select>
+      </div>
+    </header>
+
+    <section class="panel-body">
+      <div class="row">
+        <label for="provider" data-i18n="field.provider"></label>
+        <select id="provider"></select>
+      </div>
+      <p class="description" id="provider-description"></p>
+      <div id="fields" class="fields"></div>
+      <div class="actions">
+        <button id="submit" type="button" data-i18n="action.submit"></button>
+        <button id="cancel" type="button" class="secondary" data-i18n="action.cancel"></button>
+      </div>
+    </section>
+
+    <section class="panel-status" id="status-panel" hidden>
+      <h2 data-i18n="status.title"></h2>
+      <div class="status-line" id="status-line"></div>
+      <pre id="status-detail"></pre>
+    </section>
+
+    <footer class="panel-footer">
+      <span id="plugin-version"></span> · <span data-i18n="footer.suffix"></span>
+    </footer>
+  </main>
+  <script src="/v0/resource/plugins/cpa-login-hub/i18n.js?v=BUILD_STAMP"></script>
+  <script src="/v0/resource/plugins/cpa-login-hub/panel.js?v=BUILD_STAMP"></script>
+</body>
+</html>

@@ -16,14 +16,16 @@ English: [README.md](README.md)
 
 | Provider | 首次登录 | 续期(纯协议) | 备注 |
 |---|:---:|:---:|---|
-| **kiro (IdC)** | ✅ v0.1 | ✅ v0.1 | AWS IAM Identity Center — 首登自动 scrape MFA + 改密到固定值 |
-| kiro (M365)   | 🚧 v0.2 | ✅ v0.1 | Microsoft Entra external_idp — worker 代码已就位,StartLogin 分派待补 |
-| openai (codex) | 🚧 v0.2 | 🚧 v0.2 | 集成 chongpt.xyz 接码,支持长效手机验证 |
-| grok          | 🚧 v0.2 | 🚧 v0.2 | x.ai Camoufox 走 consent 页 |
-| antigravity   | 🚧 v0.2 | 🚧 v0.2 | Google 登录 + 手动扫码激活 |
+| **kiro (IdC)** | ✅ v0.2 | ✅ v0.2 | AWS IAM Identity Center — 首登自动 scrape MFA + 改密到固定值 |
+| **kiro (M365)** | ✅ v0.2 | ✅ v0.2 | Microsoft Entra external_idp — `sso_start_url` 为空时自动走 M365 分支 |
+| **openai (codex)** | ✅ v0.2 | ✅ v0.2 | 集成 chongpt.xyz 接码,支持长效手机验证。PKCE public client |
+| **grok**          | ✅ v0.2 | ✅ v0.2 | auth.x.ai Camoufox 走 consent 页。PKCE public client |
+| **antigravity**   | ✅ v0.2 | ✅ v0.2 | Google 登录 + cloudcode-pa 拉 `project_id` |
+| **cursor**        | ✅ v0.2 | 🚧 | 邮箱 OTP + Cloudflare Turnstile。续期走 cookie session 尚未移植 — 到期需重新登录 |
 
-`worker/helpers/` 里已经带了 5 provider 的完整 Python 实现,v0.2 只是把它们
-接进 Go 插件的 `StartLogin` 分派。
+5 个 provider 都在同一个 umbrella dylib 里。用户在 CPA 面板里点 **CPA Login Hub**
+菜单打开 HTML 面板,选 provider、填参数、提交,插件负责后续 Camoufox 自动化 +
+换 token + 落盘。
 
 ## 工作原理
 

@@ -17,37 +17,47 @@ back to CPA's auth pool — no manual curl-ing, no fragile hand-crafted JSON.
 
 | Provider     | First-time login | Refresh (protocol) | Notes |
 |--------------|:---:|:---:|-------|
-| **kiro (IdC)** | ✅ v0.1 | ✅ v0.1 | AWS IAM Identity Center — automatic MFA scrape, password rotation to a fixed constant on first login |
-| kiro (M365)   | 🚧 v0.2 | ✅ v0.1 | Microsoft Entra external_idp — worker code shipped, StartLogin binding pending |
-| openai (codex) | 🚧 v0.2 | 🚧 v0.2 | Includes chongpt.xyz SMS OTP integration for phone-verified accounts |
-| grok          | 🚧 v0.2 | 🚧 v0.2 | x.ai Camoufox-based consent flow |
-| antigravity   | 🚧 v0.2 | 🚧 v0.2 | Google login with manual QR activation |
+| **kiro (IdC)** | ✅ v0.2 | ✅ v0.2 | AWS IAM Identity Center — automatic MFA scrape, password rotation to a fixed constant on first login |
+| **kiro (M365)** | ✅ v0.2 | ✅ v0.2 | Microsoft Entra external_idp — auto-selected when `sso_start_url` is empty |
+| **openai (codex)** | ✅ v0.2 | ✅ v0.2 | Includes chongpt.xyz SMS OTP integration for phone-verified accounts. PKCE public client |
+| **grok**          | ✅ v0.2 | ✅ v0.2 | auth.x.ai Camoufox-based consent flow. PKCE public client |
+| **antigravity**   | ✅ v0.2 | ✅ v0.2 | Google login + cloudcode-pa `project_id` resolution |
+| **cursor**        | ✅ v0.2 | 🚧 | Email OTP + Turnstile. Refresh requires cookie-session flow (not yet ported) — re-login after expiry |
 
-The Python worker under `worker/helpers/` already contains full implementations
-for every provider — v0.2 wires them into the Go plugin's `StartLogin` dispatch.
+All five providers ship in a single umbrella dylib. Enter parameters from the
+in-panel HTML UI ("CPA Login Hub" menu item); the plugin handles Camoufox
+automation, token exchange, and auth-file drop-in.
 
 ## How it works
 
 ```
-CPA management panel
-       │
-       │  POST /v0/management/auth-files/plugin-login-url
-       ▼
-CPA host loads cpa-login-hub.so (dlopen)
-       │
-       │  cliproxy_plugin_call("auth.login.start", …)
-       ▼
-Go plugin (this repo)
-       │
-       │  fork subprocess in its own session
-       ▼
-Python worker (worker/runner.py)
-       │
-       │  Camoufox + Playwright browser state machine
-       ▼
-Provider login pages (kiro / M365 / codex / …)
-       │
-       │  writes CLIProxyAPI_<id>.json
+CPA management panel                Go plugin                    Python worker
+        │                              │                                │
+1. Open "CPA Login Hub" menu →         │                                │
+   fetch panel HTML                    │                                │
+   ← rendered form (provider dropdown  │                                │
+   + schema-driven inputs)             │                                │
+        │                              │                                │
+2. Submit form                      → /prepare (POST)                   │
+   (email/password/proxy/…)            │ stash in pendingSlot           │
+        │                              │                                │
+3. Navigate to                      → /cpa-login-hub-auth-url           │
+   /v0/management/                     │ (CPA-native) → StartLogin      │
+   cpa-login-hub-auth-url              │ pops pendingSlot,              │
+   ← {status:ok, state}                │ spawns worker goroutine ──────→│ Camoufox + Playwright
+        │                              │ returns state immediately      │ (kiro / openai /
+        │                              │                                │  grok / antigravity /
+4. Poll /get-auth-status            → PollLogin                         │  cursor state machines)
+   ← wait / wait / … / ok              │ checks flow.isDone(),          │
+        │                              │ reads worker's CPA JSON file,  │
+        │                              │ returns AuthData ─────→ CPA    │
+        │                              │                        auth-dir/
+        │                              │                        CLIProxyAPI_*.json
+                                       │
+                                       │ For refresh (later):
+                                       │   protocol-only HTTP to
+                                       │   provider's /token endpoint,
+                                       │   no browser, no worker fork.
        ▼
 Go plugin reads the JSON, wraps into pluginapi.AuthData
        │

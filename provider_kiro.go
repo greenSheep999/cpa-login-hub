@@ -1,220 +1,89 @@
-// Package main — Kiro provider (AWS IAM Identity Center + M365 external_idp).
+// Package main — Kiro provider binding.
 //
-// StartLogin/PollLogin run the Python worker via worker_bridge. RefreshAuth
-// stays 100% in Go: it's a plain OAuth token refresh against
-// oidc.<region>.amazonaws.com/token (IdC) or the M365 token_endpoint
-// (external_idp) — no browser needed, no worker fork.
+// Kiro has two login paths that live in the same Python entry point
+// (helpers/kiro.py::run):
 //
-// Because these flows are synchronous today (the worker blocks the
-// StartLogin RPC until the browser flow completes), StartLogin actually
-// runs the whole browser flow inline and PollLogin just returns the
-// cached result. This matches how muxhub scripts/login-hub/server.py
-// operates. A future async refactor can move to a proper poll loop.
+//   - M365 / external_idp (default, if extras["sso_start_url"] is empty)
+//   - AWS IAM Identity Center / IdC (if extras["sso_start_url"] is set)
+//
+// Which one runs is decided inside the worker, not here — we just pass
+// the extras through and the Python side dispatches. Both produce a CPA
+// JSON with “type: "kiro"“ and refresh through kiroRefresh (which itself
+// picks between IdC vs external_idp by inspecting auth_method).
 package main
 
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
-	"strings"
-	"sync"
-	"time"
 )
 
-// kiroFlowState carries data between StartLogin (browser run) and
-// PollLogin (result fetch). Keyed by an opaque state string CPA passes
-// back to us verbatim.
-type kiroFlowState struct {
-	Provider  string
-	Result    *workerResult
-	StartedAt time.Time
-	Metadata  map[string]any
+var kiroBinding = providerBinding{
+	Key:          "kiro",
+	Label:        "Kiro (M365 SSO / AWS IdC)",
+	Description:  "Camoufox 隔离启浏览器 → app.kiro.dev/signin → 按 email 域自动识别 M365 或 IdC → 拦截 :3128/oauth/callback 拿 code → 换 token → 落盘 CLIProxyAPI_<user>.json",
+	StorageType:  "kiro",
+	FilenameHint: "CLIProxyAPI_<user>.json",
+	Fields:       commonFields,
+	Extras: []fieldDef{
+		{Key: "email", Type: "text", Title: "邮箱 (M365 或 IdC 的登录用户名)", Placeholder: "user@example.com", Required: true},
+		{Key: "password", Type: "password", Title: "密码", Required: true},
+		{Key: "totp_secret", Type: "password", Title: "TOTP base32 (可选)", Placeholder: "MYKALLU3… — 自动算 6 位"},
+		{Key: "sso_start_url", Type: "text", Title: "SSO Start URL (仅 IdC)", Placeholder: "https://d-xxxx.awsapps.com/start"},
+		{Key: "region", Type: "text", Title: "Region (可选，默认 us-east-1)", Placeholder: "us-east-1 / eu-central-1"},
+		{Key: "username", Type: "text", Title: "Username override (可选)", Placeholder: "文件名里的用户段"},
+	},
+	buildLoginJob: kiroBuildLoginJob,
+	parseStorage:  kiroParseStorage,
+	refreshFunc:   kiroRefresh,
 }
 
-var (
-	kiroFlowsMu sync.Mutex
-	kiroFlows   = map[string]*kiroFlowState{}
-)
+func init() {
+	registerProvider(&kiroBinding)
+}
 
-// kiroStartLogin drives a first-time or re-login browser flow.
-//
-// The CPA management panel will call StartLogin, take our returned URL
-// (empty in our case since the browser opens inside the worker itself,
-// not a hosted OAuth callback), then poll. We complete the login inline
-// during StartLogin so the poll call is cheap.
-func kiroStartLogin(req authLoginStartRequest) []byte {
+// kiroBuildLoginJob turns the panel-provided request into a workerJob
+// the Python runner understands. Panel input validation happens here.
+func kiroBuildLoginJob(req authLoginStartRequest, outDir string) (workerJob, error) {
 	extras := parseExtras(req.Metadata)
-	if extras["sso_start_url"] == "" && extras["email"] == "" {
-		return errorEnvelope("missing_parameter",
-			"kiro provider requires extras.sso_start_url (IdC) or extras.email (M365)")
+	if extras["email"] == "" {
+		return workerJob{}, fmt.Errorf("kiro requires email")
 	}
 	if extras["password"] == "" {
-		return errorEnvelope("missing_parameter", "kiro provider requires extras.password")
+		return workerJob{}, fmt.Errorf("kiro requires password")
 	}
-
-	// Where should the worker drop its CPA JSON? Use a per-flow scratch
-	// dir under the plugin bundle so multiple concurrent flows don't
-	// stomp on each other. The Go side reads the JSON back from disk
-	// then embeds it in AuthData.StorageJSON.
-	bundle, err := pluginBundleDir()
-	if err != nil {
-		return errorEnvelope("bundle_error", err.Error())
-	}
-	stateToken := newStateToken()
-	outDir := filepath.Join(bundle, "worker", "runs", stateToken)
-	if err := os.MkdirAll(outDir, 0o700); err != nil {
-		return errorEnvelope("io_error", err.Error())
-	}
-
-	job := workerJob{
+	// IdC path is entered by presence of sso_start_url; we don't
+	// validate it further — the worker knows the accepted forms.
+	return workerJob{
 		Provider: "kiro",
-		Label:    stringOr(extras["label"], stateToken),
+		Label:    stringOr(extras["label"], extras["email"]),
 		Proxy:    extras["proxy"],
 		OutDir:   outDir,
 		Timeout:  intOr(req.Metadata, "timeout_seconds", 600),
 		Extras:   metadataToExtras(req.Metadata),
-	}
-
-	result, runErr := runWorker(job)
-	if runErr != nil {
-		return errorEnvelope("worker_error", runErr.Error())
-	}
-
-	kiroFlowsMu.Lock()
-	kiroFlows[stateToken] = &kiroFlowState{
-		Provider:  "kiro",
-		Result:    result,
-		StartedAt: time.Now(),
-		Metadata:  req.Metadata,
-	}
-	kiroFlowsMu.Unlock()
-
-	// Return the state token so PollLogin can retrieve the result. URL
-	// is empty because the Camoufox browser opened locally on the CPA
-	// host — the user isn't clicking an OAuth URL in *their* browser.
-	// Panels that expect a URL should treat empty as "no user action
-	// required, wait for PollLogin".
-	return okEnvelope(authLoginStartResponse{
-		Provider:  req.Provider,
-		URL:       "",
-		State:     stateToken,
-		ExpiresAt: time.Now().Add(15 * time.Minute),
-		Metadata:  map[string]any{"provider_key": "kiro"},
-	})
+	}, nil
 }
 
-func kiroPollLogin(req authLoginPollRequest) []byte {
-	kiroFlowsMu.Lock()
-	flow, ok := kiroFlows[req.State]
-	if ok {
-		delete(kiroFlows, req.State)
-	}
-	kiroFlowsMu.Unlock()
-	if !ok {
-		return errorEnvelope("unknown_state", fmt.Sprintf("no kiro flow for state %q", req.State))
-	}
-
-	if flow.Result.ErrorMessage != "" {
-		return okEnvelope(authLoginPollResponse{
-			Status:  "error",
-			Message: flow.Result.ErrorMessage,
-		})
-	}
-
-	// The worker's ``_result`` payload includes an ``out_path`` pointing
-	// at CLIProxyAPI_<id>.json. Read + embed it verbatim as
-	// AuthData.StorageJSON so CPA can persist the exact file we produced.
-	var final struct {
-		OutPath  string `json:"out_path"`
-		Identity string `json:"identity"`
-		Extra    struct {
-			ProfileARN string `json:"profile_arn"`
-			Region     string `json:"region"`
-		} `json:"extra"`
-	}
-	if err := json.Unmarshal(flow.Result.FinalResult, &final); err != nil {
-		return errorEnvelope("bad_worker_result", err.Error())
-	}
-	storage, err := os.ReadFile(final.OutPath)
-	if err != nil {
-		return errorEnvelope("io_error", fmt.Sprintf("read %s: %v", final.OutPath, err))
-	}
-	fileName := filepath.Base(final.OutPath)
-
-	auth := authData{
-		Provider:    "kiro",
-		ID:          fileName, // stable ID: filename (unique per email)
-		FileName:    fileName,
-		Label:       stringOr(final.Identity, fileName),
-		StorageJSON: storage,
-		Metadata: map[string]any{
-			"profile_arn": final.Extra.ProfileARN,
-			"region":      final.Extra.Region,
-			"source":      "cpa-login-hub",
-		},
-	}
-	return okEnvelope(authLoginPollResponse{
-		Status: "success",
-		Auth:   auth,
-	})
-}
-
-// kiroRefresh does a protocol-level token refresh against AWS SSO OIDC
-// (IdC) or the M365 token_endpoint (external_idp). No browser, no worker.
-func kiroRefresh(req authRefreshRequest) []byte {
-	var stored kiroStorage
-	if err := json.Unmarshal(req.StorageJSON, &stored); err != nil {
-		return errorEnvelope("bad_storage", err.Error())
-	}
-	if stored.RefreshToken == "" {
-		return errorEnvelope("missing_refresh_token", "stored auth has no refresh_token")
-	}
-	authMethod := strings.ToLower(stored.AuthMethod)
-	switch authMethod {
-	case "idc":
-		return kiroRefreshIdc(req, stored)
-	case "external_idp":
-		return kiroRefreshExternalIdp(req, stored)
-	case "social", "":
-		// Cognito social — supported by the same OAuth2 refresh flow but
-		// against Kiro's public /oauth/token. Stub for v0.1 — most
-		// production accounts run IdC or external_idp.
-		return errorEnvelope("not_implemented",
-			"social (Cognito) kiro refresh coming in v0.2")
-	default:
-		return errorEnvelope("unknown_auth_method",
-			fmt.Sprintf("kiro storage has unknown auth_method=%q", stored.AuthMethod))
-	}
-}
-
-// kiroParse is called when CPA sees a *.json file on disk and asks
-// plugins to identify it. We claim every kiro auth file (type=="kiro").
-func handleKiroParse(req authParseRequest, authMethod string) []byte {
-	fileName := req.FileName
-	if fileName == "" && req.Path != "" {
-		fileName = filepath.Base(req.Path)
-	}
-	// Extract email/identity for a nicer label.
+// kiroParseStorage extracts (label, metadata) from a stored kiro CPA JSON.
+// Label priority: email > filename-derived.
+func kiroParseStorage(rawJSON []byte, fileName string) (string, map[string]any) {
 	var meta struct {
 		Email      string `json:"email"`
+		AuthMethod string `json:"auth_method"`
 		ProfileARN string `json:"profile_arn"`
 		Region     string `json:"region"`
+		StartURL   string `json:"start_url"`
 	}
-	_ = json.Unmarshal(req.RawJSON, &meta)
-
-	auth := authData{
-		Provider:    "kiro",
-		ID:          fileName,
-		FileName:    fileName,
-		Label:       stringOr(meta.Email, fileName),
-		StorageJSON: []byte(req.RawJSON),
-		Metadata: map[string]any{
-			"auth_method": authMethod,
-			"profile_arn": meta.ProfileARN,
-			"region":      meta.Region,
-			"source":      "cpa-login-hub",
-		},
+	_ = json.Unmarshal(rawJSON, &meta)
+	label := meta.Email
+	if label == "" {
+		label = filepath.Base(fileName)
 	}
-	return okEnvelope(authParseResponse{Handled: true, Auth: auth})
+	return label, map[string]any{
+		"email":       meta.Email,
+		"auth_method": meta.AuthMethod,
+		"profile_arn": meta.ProfileARN,
+		"region":      meta.Region,
+		"start_url":   meta.StartURL,
+	}
 }

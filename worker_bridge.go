@@ -225,22 +225,42 @@ func shutdownWorkers() {
 	activeWorkersMu.Unlock()
 }
 
-// pluginBundleDir returns the directory the plugin .so was loaded from —
-// this is where worker/ and worker/.venv/ live. We resolve it via the
-// executable path of the *shared library*; Go doesn't expose that
-// directly, so we fall back to the process cwd hint CPA passes in
-// (typically “plugins-dir/<plugin-id>/“). Environment variables win
-// when set — this makes local dev + testing straightforward.
+// pluginBundleDir returns the directory holding worker/ and worker/.venv/.
+//
+// CPA discovers .so/.dylib files at the flat plugins/ dir — it does NOT
+// recurse into subdirectories. So we can't keep .dylib and worker/ under
+// the same directory as CPA's plugin scanner sees. Layout used:
+//
+//	plugins/
+//	├── cpa-login-hub.dylib   ← CPA loads this
+//	└── cpa-login-hub/        ← we look for worker/ here (sibling dir)
+//	    └── worker/
+//	        └── runner.py
+//
+// Resolution order:
+//  1. $CPA_LOGIN_HUB_DIR (developer override)
+//  2. $CLIPROXY_PLUGIN_DIR (host-provided)
+//  3. dladdr → plugins/<pluginName>/ next to the loaded .dylib
+//  4. process cwd (last-resort fallback)
 func pluginBundleDir() (string, error) {
 	if p := os.Getenv("CPA_LOGIN_HUB_DIR"); p != "" {
 		return p, nil
 	}
-	// Some hosts pass CLIPROXY_PLUGIN_DIR when they load us; honour it.
 	if p := os.Getenv("CLIPROXY_PLUGIN_DIR"); p != "" {
 		return p, nil
 	}
-	// Final fallback: process CWD (works when CPA is launched from the
-	// plugin's own directory during development).
+	if libDir := selfLibraryDir(); libDir != "" {
+		// Preferred: sibling subdirectory named after the plugin ID.
+		sibling := filepath.Join(libDir, pluginName)
+		if _, err := os.Stat(filepath.Join(sibling, "worker")); err == nil {
+			return sibling, nil
+		}
+		// Fallback: worker/ next to the .dylib itself (dev / packaged
+		// tarball extracted into its own dir).
+		if _, err := os.Stat(filepath.Join(libDir, "worker")); err == nil {
+			return libDir, nil
+		}
+	}
 	return os.Getwd()
 }
 

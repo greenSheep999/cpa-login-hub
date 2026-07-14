@@ -29,11 +29,24 @@ curl -L https://github.com/greenSheep999/cpa-login-hub/releases/latest/download/
   | tar -xzC ~/.cli-proxy-api/plugins/
 ```
 
-The archive extracts into `~/.cli-proxy-api/plugins/cpa-login-hub/` with:
+After extraction the layout MUST be:
 
-- `cpa-login-hub.dylib` (or `.so` / `.dll`)
-- `worker/` — Python source tree
-- `worker/requirements.txt` — pinned dependencies
+```
+~/.cli-proxy-api/plugins/
+├── cpa-login-hub.dylib     ← CPA scans the top level for .dylib/.so/.dll
+└── cpa-login-hub/          ← plugin bundle (worker + venv live here)
+    └── worker/
+        ├── runner.py
+        ├── requirements.txt
+        └── helpers/…
+```
+
+**Why the dylib is not inside the `cpa-login-hub/` directory**: CPA's
+plugin scanner (`internal/pluginhost/platform.go`) only looks at the top
+level of the plugin dir — it does not recurse. A `.dylib` buried a level
+deep is invisible. The sibling `cpa-login-hub/` folder holds the Python
+worker (self-provisioned venv, panel HTML/CSS/JS), which the plugin
+locates via `dladdr` at load time.
 
 ## Option B — Build from source
 
@@ -43,9 +56,9 @@ cd cpa-login-hub
 make install CPA_PLUGIN_DIR=~/.cli-proxy-api/plugins
 ```
 
-`make install` copies the freshly-built shared library and the `worker/`
-directory into `$(CPA_PLUGIN_DIR)/cpa-login-hub/`. Override the plugin
-dir if your CPA install is elsewhere.
+`make install` places the shared library at the top of `$(CPA_PLUGIN_DIR)`
+and rsyncs `worker/` into `$(CPA_PLUGIN_DIR)/cpa-login-hub/worker/` —
+exactly the layout above.
 
 ## Configure CPA
 

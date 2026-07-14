@@ -60,6 +60,30 @@ type kiroStorage struct {
 	SsoUsername         string `json:"sso_username,omitempty"`
 }
 
+// kiroRefresh is the binding entry point. Decodes the stored JSON to
+// determine which flow to run (IdC / external_idp) and delegates.
+func kiroRefresh(req authRefreshRequest) []byte {
+	var stored kiroStorage
+	if err := json.Unmarshal(req.StorageJSON, &stored); err != nil {
+		return errorEnvelope("bad_storage", err.Error())
+	}
+	if stored.RefreshToken == "" {
+		return errorEnvelope("missing_refresh_token", "stored kiro auth has no refresh_token")
+	}
+	switch strings.ToLower(stored.AuthMethod) {
+	case "idc":
+		return kiroRefreshIdc(req, stored)
+	case "external_idp":
+		return kiroRefreshExternalIdp(req, stored)
+	case "social", "":
+		return errorEnvelope("not_implemented",
+			"social (Cognito) kiro refresh not yet implemented — re-login via the panel")
+	default:
+		return errorEnvelope("unknown_auth_method",
+			fmt.Sprintf("kiro storage has unknown auth_method=%q", stored.AuthMethod))
+	}
+}
+
 func kiroRefreshIdc(req authRefreshRequest, stored kiroStorage) []byte {
 	region := stored.Region
 	if region == "" {
@@ -166,15 +190,13 @@ func kiroBuildRefreshResponse(req authRefreshRequest, stored kiroStorage, expire
 		return errorEnvelope("marshal_error", err.Error())
 	}
 	// AWS access tokens live ~1h for IdC and ~5m-1h for M365. Refresh
-	// aggressively: 5 minutes before expiry.
-	nextRefresh := time.Now().Add(time.Duration(expiresIn-300) * time.Second)
-	if expiresIn <= 300 {
-		nextRefresh = time.Now().Add(30 * time.Second)
-	}
+	// aggressively: 5 minutes before expiry. If expiresIn is unknown
+	// or absurdly small we conservatively wait 15 minutes.
+	nextRefresh := computeNextRefresh(expiresIn)
 	auth := authData{
-		Provider:    "kiro",
+		Provider:    pluginName, // umbrella — see dispatch.go
 		ID:          req.AuthID,
-		FileName:    req.AuthID, // ID == filename by our convention
+		FileName:    req.AuthID,
 		Label:       stringOr(stored.Email, req.AuthID),
 		StorageJSON: storageBytes,
 		Metadata:    req.Metadata,
@@ -185,7 +207,8 @@ func kiroBuildRefreshResponse(req authRefreshRequest, stored kiroStorage, expire
 	}
 	auth.Metadata["profile_arn"] = stored.ProfileARN
 	auth.Metadata["region"] = stored.Region
-	auth.Metadata["source"] = "cpa-login-hub"
+	auth.Metadata["source"] = pluginName
+	auth.Metadata["provider_key"] = "kiro"
 	return okEnvelope(authRefreshResponse{
 		Auth:             auth,
 		NextRefreshAfter: nextRefresh,

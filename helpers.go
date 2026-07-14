@@ -4,6 +4,8 @@ package main
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
+	"time"
 )
 
 // newStateToken returns a URL-safe hex string used to correlate
@@ -17,32 +19,58 @@ func newStateToken() string {
 // parseExtras extracts a plain string bag from CPA's request metadata,
 // mapping “extras.*“ keys down one level. CPA passes user-configured
 // provider parameters under “Metadata“ — we surface a flat dict for
-// callers that just want string values (paths that pass through to the
-// worker's “extras“ dict, verbatim).
+// callers that just want string values.
+//
+// Type coercion: JSON booleans and numbers are stringified rather than
+// dropped, so panel inputs like “timeout_seconds: 900“ and
+// “headless: true“ survive the round-trip.
 func parseExtras(metadata map[string]any) map[string]string {
 	out := map[string]string{}
 	if metadata == nil {
 		return out
+	}
+	assign := func(k string, v any) {
+		out[k] = coerceString(v)
 	}
 	// Two conventions in the wild:
 	//   metadata["extras"] = {..., password: ...}   (nested)
 	//   metadata["password"] = ...                  (flat)
 	if nested, ok := metadata["extras"].(map[string]any); ok {
 		for k, v := range nested {
-			if s, ok := v.(string); ok {
-				out[k] = s
-			}
+			assign(k, v)
 		}
 	}
 	for k, v := range metadata {
 		if k == "extras" {
 			continue
 		}
-		if s, ok := v.(string); ok {
-			out[k] = s
-		}
+		assign(k, v)
 	}
 	return out
+}
+
+func coerceString(v any) string {
+	switch n := v.(type) {
+	case string:
+		return n
+	case bool:
+		if n {
+			return "true"
+		}
+		return "false"
+	case int:
+		return fmt.Sprintf("%d", n)
+	case int64:
+		return fmt.Sprintf("%d", n)
+	case float64:
+		// Prefer integer formatting when it's a whole number.
+		if n == float64(int64(n)) {
+			return fmt.Sprintf("%d", int64(n))
+		}
+		return fmt.Sprintf("%g", n)
+	default:
+		return ""
+	}
 }
 
 // metadataToExtras flattens CPA's Metadata bag into the shape muxhub's
@@ -97,5 +125,23 @@ func intOr(metadata map[string]any, key string, fallback int) int {
 		return int(n)
 	default:
 		return fallback
+	}
+}
+
+// computeNextRefresh picks a NextRefreshAfter timestamp that keeps CPA's
+// scheduler from thrashing regardless of what the token endpoint returned.
+//
+//   - expiresIn ≤ 0  → 15 minutes (endpoint gave us nothing useful; be conservative)
+//   - expiresIn ≤ 5m → 30 seconds (short-lived token; still let some time pass)
+//   - otherwise      → expiresIn − 5 minutes (proactive refresh)
+func computeNextRefresh(expiresIn int) time.Time {
+	now := time.Now()
+	switch {
+	case expiresIn <= 0:
+		return now.Add(15 * time.Minute)
+	case expiresIn <= 300:
+		return now.Add(30 * time.Second)
+	default:
+		return now.Add(time.Duration(expiresIn-300) * time.Second)
 	}
 }
