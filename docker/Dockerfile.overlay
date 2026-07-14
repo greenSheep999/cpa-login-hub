@@ -1,0 +1,76 @@
+# Dockerfile.overlay — CPA image + Python 3 + Camoufox/Playwright runtime deps.
+#
+# Base: the CPA image you already run.
+# Adds:
+#   1. python3 + venv + pip (needed by cpa-login-hub plugin's worker/)
+#   2. All Playwright/Camoufox system libs so a headless Firefox launches
+#      without missing-lib errors.
+#   3. Pre-warmed venv + Firefox binary baked in — so the first user click
+#      doesn't have to wait 3-5 minutes for pip install + camoufox fetch.
+#
+# Build:
+#   docker build -f docker/Dockerfile.overlay \
+#     -t ghcr.io/daniellee2015/cli-proxy-api:with-loginhub \
+#     --build-arg BASE=ghcr.io/daniellee2015/cli-proxy-api:latest .
+#
+# Then update your compose to use the new tag and `docker compose up -d`.
+#
+# Notes:
+#   - We build for linux/arm64 (matching vps196). If you have x86 hosts too,
+#     drive with `docker buildx build --platform linux/amd64,linux/arm64`.
+#   - The pre-warmed venv sits at /opt/cpa-login-hub-venv and is bind-linked
+#     into the plugin bundle at container start via the entrypoint override.
+#     Alternative: skip the pre-warm and let venv_setup.go do it on first
+#     run — but then the user waits several minutes on their first login.
+
+ARG BASE=ghcr.io/daniellee2015/cli-proxy-api:latest
+FROM ${BASE} AS runtime
+
+USER root
+
+# --- 1. System deps ---------------------------------------------------------
+# Python + venv + pip: the plugin's worker/ tree needs these to bootstrap.
+# Playwright / Camoufox system libs: headless Firefox pulls in NSS + a big
+# graphics/audio stack even in headless mode. List sourced from Playwright
+# 1.60 official Debian bookworm deps table.
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      python3 python3-venv python3-pip \
+      ca-certificates curl \
+      # --- Firefox core deps -------------------------------------------------
+      libnss3 libnspr4 \
+      libdbus-glib-1-2 \
+      libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+      libxtst6 libxi6 libxrender1 libxcursor1 libxext6 \
+      libgtk-3-0 libpango-1.0-0 libcairo2 libatk1.0-0 libatk-bridge2.0-0 \
+      libasound2 libgbm1 libdrm2 \
+      # --- Fonts + graphics --------------------------------------------------
+      fonts-liberation fonts-noto-cjk fonts-noto-color-emoji \
+      libgl1 libegl1 \
+ && rm -rf /var/lib/apt/lists/*
+
+# --- 2. Pre-warm the plugin's Python venv ---------------------------------
+# We install into a location the plugin will symlink into on startup. This
+# saves ~90s + ~200MB of network on every first-time user login. The plugin
+# is version-agnostic here — worker/requirements.txt is copied in during
+# image build so the pinned deps come along.
+COPY worker/requirements.txt /tmp/cpa-login-hub-requirements.txt
+
+RUN python3 -m venv /opt/cpa-login-hub-venv \
+ && /opt/cpa-login-hub-venv/bin/pip install --no-cache-dir --upgrade pip \
+ && /opt/cpa-login-hub-venv/bin/pip install --no-cache-dir -r /tmp/cpa-login-hub-requirements.txt \
+ && /opt/cpa-login-hub-venv/bin/python -m camoufox fetch \
+ && rm /tmp/cpa-login-hub-requirements.txt
+
+# --- 3. Entrypoint tweak --------------------------------------------------
+# When the plugin bundle mounts in (via CPA's normal plugins/ layout), the
+# plugin expects worker/.venv/. We symlink our pre-built venv into place
+# on every start. If the plugin bundle isn't mounted yet, this is a no-op.
+COPY docker/entrypoint-overlay.sh /usr/local/bin/entrypoint-overlay.sh
+RUN chmod +x /usr/local/bin/entrypoint-overlay.sh
+
+# Chain: run our overlay hook, then hand off to the base image's entry.
+# The base entrypoint path can vary between CPA builds — the script probes
+# it. If you know the exact path (e.g. /CLIProxyAPI/entrypoint.sh), tweak
+# the tail of entrypoint-overlay.sh.
+ENTRYPOINT ["/usr/local/bin/entrypoint-overlay.sh"]
